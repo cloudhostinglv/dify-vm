@@ -1,0 +1,39 @@
+# Caddyfile — TLS front for Dify, consistent with the other avots-vm builds.
+#
+# Dify ships its OWN nginx (container port 80) which already fans requests out
+# to api / web / plugin_daemon / files. We keep that nginx on plain HTTP and put
+# Caddy in front for automatic TLS, so the only public ports on the VM are
+# 80/443 (Caddy). Dify's nginx is published on host 8080 (loopback) only.
+#
+# Run Caddy on the host (or its own tiny container) with:
+#   DOMAIN=ai.client.example caddy run --config /srv/avots-vm/dify/Caddyfile
+# DOMAIN is injected per client by cloud-init.
+
+{
+	# ACME contact for Let's Encrypt expiry notices. Override per deployment.
+	email admin@{$DOMAIN}
+}
+
+{$DOMAIN} {
+	# Reverse-proxy to Dify's internal nginx (EXPOSE_NGINX_PORT=8080).
+	# Dify's nginx terminates app routing; Caddy only does TLS + proxy.
+	reverse_proxy 127.0.0.1:8080 {
+		# Dify uses Socket.IO/WebSocket (console live updates, workflow runs).
+		# Caddy proxies Upgrade/Connection headers transparently, so no extra
+		# config is needed for websockets here.
+
+		# Preserve the original Host/scheme so Dify builds correct absolute URLs
+		# for the console and uploaded files.
+		header_up Host {host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	# Large request bodies: dataset/file uploads and (one-time) plugin package
+	# uploads. Keep in sync with NGINX_CLIENT_MAX_BODY_SIZE in the Dify .env.
+	request_body {
+		max_size 100MB
+	}
+
+	encode zstd gzip
+}

@@ -1,0 +1,73 @@
+# autoinstall-snippet.yaml — cloud-init drop-in for a single-tenant Dify VM.
+#
+# Merge write_files + runcmd into the VM's cloud-init user-data. The pipeline
+# substitutes {placeholder} tokens per client BEFORE the VM boots, the same way
+# the other avots-vm builds do:
+#   {avots_key}      -> this client's av_mcp_... key
+#   {domain}         -> the client subdomain Caddy terminates TLS for
+#   {secret_key}     -> a UNIQUE per-VM key (generate at render time:
+#                       openssl rand -base64 42). Must NOT be reused across VMs.
+#   {admin_email}    -> optional: enables the best-effort API provider wiring
+#   {admin_password} -> optional: paired with {admin_email}
+#
+# Assumes the golden image already has: Docker + compose v2, git, openssl,
+# python3, curl, Caddy, the Dify checkout baked at
+# /srv/avots-vm/dify/dify-upstream (pinned 1.14.2), and the offline plugin
+# package at /srv/avots-vm/dify/plugins/openai_api_compatible-*.difypkg.
+# If the checkout is NOT baked, provision.sh clones it (needs first-boot net).
+
+write_files:
+  # Per-VM overlay consumed by provision.sh (layered over Dify's docker/.env).
+  - path: /srv/avots-vm/dify/.env.overlay
+    permissions: '0640'
+    owner: root:root
+    content: |
+      SECRET_KEY={secret_key}
+      DOMAIN={domain}
+      AVOTS_API_KEY={avots_key}
+      AVOTS_BASE_URL=https://api.avots.ai/openai/v1
+      AVOTS_MODEL=anthropic/claude-opus-4.8
+      AVOTS_MODEL_CONTEXT=200000
+      NGINX_HTTPS_ENABLED=false
+      EXPOSE_NGINX_PORT=8080
+      EXPOSE_NGINX_SSL_PORT=8443
+      FORCE_VERIFYING_SIGNATURE=false
+      PLUGIN_MAX_PACKAGE_SIZE=524288000
+      NGINX_CLIENT_MAX_BODY_SIZE=100M
+      # Optional: uncomment to let provision.sh attempt the best-effort console
+      # API provider registration (otherwise it prints manual instructions).
+      # DIFY_ADMIN_EMAIL={admin_email}
+      # DIFY_ADMIN_PASSWORD={admin_password}
+
+  # Caddy needs DOMAIN at runtime; expose it to the caddy systemd unit.
+  - path: /etc/default/caddy-dify
+    permissions: '0644'
+    owner: root:root
+    content: |
+      DOMAIN={domain}
+
+  # Minimal systemd unit running Caddy with this build's Caddyfile.
+  - path: /etc/systemd/system/caddy-dify.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Caddy TLS front for Dify
+      After=network-online.target docker.service
+      Wants=network-online.target
+
+      [Service]
+      EnvironmentFile=/etc/default/caddy-dify
+      ExecStart=/usr/bin/caddy run --config /srv/avots-vm/dify/Caddyfile
+      ExecReload=/usr/bin/caddy reload --config /srv/avots-vm/dify/Caddyfile
+      Restart=on-failure
+      RestartSec=5s
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # 1. Bring up Dify (clones if not baked, writes docker/.env, compose up).
+  - [ bash, -lc, "DIFY_DIR=/srv/avots-vm/dify bash /srv/avots-vm/dify/provision.sh 2>&1 | tee /var/log/dify-provision.log" ]
+  # 2. Start Caddy (TLS for {domain} in front of Dify's internal nginx :8080).
+  - [ systemctl, enable, --now, caddy-dify.service ]
