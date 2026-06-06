@@ -1,0 +1,63 @@
+# panel-compose.yml — the CloudHosting setup panel + Caddy/TLS, ALONGSIDE Dify's
+# own upstream stack (which provision.sh brings up separately).
+#
+# Dify ships its own ~11-container compose + nginx on host 127.0.0.1:8080 (plain
+# HTTP; TLS off). This side-stack adds:
+#   panel -> ai-panel (PRODUCT=dify), reduced builder surface, published loopback
+#            127.0.0.1:8081 so the host-network Caddy can reach it.
+#   caddy -> host network; ONE LE cert for ${PANEL_DOMAIN}, TWO sites:
+#              :443  -> 127.0.0.1:8080 (Dify nginx)   <- "Open Dify"
+#              :8443 -> 127.0.0.1:8081 (our panel)    <- panel is ALWAYS on 8443
+#            + :80 ACME. (Dify's nginx SSL port is moved off 8443 in the overlay so
+#            it never collides with our panel.)
+#
+# Brought up by firstboot.sh AFTER provision.sh. Reads /opt/dify-vm/.env (PANEL_*).
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  panel:
+    image: ghcr.io/cloudhostinglv/ai-panel:latest
+    container_name: dify-panel
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      PRODUCT: "dify"
+      PANEL_PASSWORD: "${PANEL_PASSWORD}"
+      PANEL_REQUIRE_AUTH: "1"
+      PANEL_PORT: "8080"
+      PANEL_DOMAIN: "${PANEL_DOMAIN}"
+      AVOTS_API_KEY: "${AVOTS_API_KEY:-}"
+      HOME: "/paneldata"
+    volumes:
+      - ./paneldata:/paneldata
+    ports:
+      - "127.0.0.1:8081:8080"   # loopback only; host-network Caddy fronts it
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *logging
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: dify-caddy
+    restart: unless-stopped
+    # Host network so Caddy binds :80/:443/:8443 directly and can reach BOTH
+    # Dify's nginx (127.0.0.1:8080) and our panel (127.0.0.1:8081) on the loopback.
+    network_mode: host
+    environment:
+      PANEL_DOMAIN: "${PANEL_DOMAIN}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
+
+volumes:
+  caddy_data:
+  caddy_config:

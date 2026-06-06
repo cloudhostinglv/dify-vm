@@ -1,0 +1,20 @@
+# First-boot provisioning oneshot for the Dify per-client VM.
+# Installed + enabled by autoinstall-snippet.yaml. Runs firstboot.sh ONCE after docker
+# + networking are up: writes the Dify overlay, runs provision.sh (clones + starts the
+# Dify upstream stack), brings up our panel + Caddy side-stack, then disables itself.
+
+[Unit]
+Description=Dify VM first-boot provisioning (Dify stack + panel + TLS)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+ConditionPathExists=/opt/dify-vm/firstboot.sh
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Dify clones its upstream repo + pulls ~11 images on first boot; give it room.
+TimeoutStartSec=1800
+ExecStart=/opt/dify-vm/firstboot.sh
+
+[Install]
+WantedBy=multi-user.target
