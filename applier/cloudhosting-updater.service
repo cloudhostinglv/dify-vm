@@ -1,0 +1,25 @@
+# Runs the host-side software updater when the panel signals an update request.
+# Triggered by cloudhosting-updater.path (oneshot — git-pulls the VM repo, pulls
+# images, recreates containers, re-stamps the deployed version, then exits). This
+# service, NOT the web panel, holds docker + git access. GENERIC across products:
+# all per-VM config (PRODUCT, COMPOSE_FILE, DATA_DIR, REPO_DIR) comes from the
+# EnvironmentFile, so this unit is identical on every appliance.
+
+[Unit]
+Description=CloudHosting AI Panel software updater (git pull + docker compose pull/up)
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+# Per-VM product + paths. update.sh also reads this file directly.
+EnvironmentFile=/etc/cloudhosting-panel.env
+ExecStart=/usr/local/lib/cloudhosting/update.sh
+# An update recreates containers + may take a minute (image pulls).
+TimeoutStartSec=900
+# Needs docker + git + the repo/compose/data dirs; no extra hardening that would
+# block git/docker (the applier counterpart is more locked down — this one writes
+# the repo checkout too).
+
+[Install]
+WantedBy=multi-user.target

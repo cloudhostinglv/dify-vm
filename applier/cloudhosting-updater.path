@@ -1,0 +1,16 @@
+# Watches the panel-writable dir for the panel's UPDATE signal (Dify VM).
+# The web panel (unprivileged) writes <dir>/.update-request; this path unit fires
+# cloudhosting-updater.service, which runs update.sh on the HOST (git pull + docker
+# compose pull/up). firstboot.sh installs + enables these units.
+#
+# PathChanged MUST be the host path of the panel-writable dir. Dify: /opt/dify-vm/paneldata.
+
+[Unit]
+Description=Watch for CloudHosting AI Panel update requests (Dify)
+
+[Path]
+PathChanged=/opt/dify-vm/paneldata/.update-request
+Unit=cloudhosting-updater.service
+
+[Install]
+WantedBy=multi-user.target

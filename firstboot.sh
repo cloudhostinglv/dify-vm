@@ -84,6 +84,31 @@ log "Bringing up the panel + Caddy side-stack…"
 docker compose -f "${PANEL_COMPOSE}" pull
 docker compose -f "${PANEL_COMPOSE}" up -d
 
+# --- 4b. Install the host-side software updater (panel "Update software" button) -----
+# The panel (unprivileged) writes ./paneldata/.update-request; this host updater
+# git-pulls dify-vm + docker compose -f panel-compose.yml pull/up. NOTE: this updates
+# OUR panel side-stack + config; Dify's own upstream stack (under state/) updates via
+# Dify's own channel, not here.
+log "Installing updater units"
+APPLIER_LIB="/usr/local/lib/cloudhosting"
+install -d -m 0755 "${APPLIER_LIB}"
+install -m 0755 "${APP_DIR}/applier/update.sh" "${APPLIER_LIB}/update.sh"
+cp "${APP_DIR}/applier/cloudhosting-updater.path"    /etc/systemd/system/
+cp "${APP_DIR}/applier/cloudhosting-updater.service" /etc/systemd/system/
+cat > /etc/cloudhosting-panel.env <<EOF
+PRODUCT=dify
+COMPOSE_FILE=${PANEL_COMPOSE}
+COMPOSE_PROJECT_DIR=${APP_DIR}
+REPO_DIR=${APP_DIR}
+DATA_DIR=${APP_DIR}/paneldata
+UPDATE_BRANCH=main
+EOF
+chmod 0644 /etc/cloudhosting-panel.env
+systemctl daemon-reload
+systemctl enable --now cloudhosting-updater.path
+log "Updater enabled (watching ${APP_DIR}/paneldata/.update-request)"
+"${APPLIER_LIB}/update.sh" --stamp-only || log "WARN: initial version stamp failed"
+
 # --- 5. Disable this oneshot --------------------------------------------------------
 log "Disabling dify-firstboot.service (provisioning complete)"
 systemctl disable dify-firstboot.service 2>/dev/null || true
