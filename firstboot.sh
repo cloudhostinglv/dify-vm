@@ -2,25 +2,25 @@
 # firstboot.sh — one-shot first-boot provisioning for the Dify per-client VM.
 # Runs ONCE via dify-firstboot.service. Idempotent; disables itself at the end.
 #
-# Dify is special: it has no compose of ours — provision.sh clones Dify's upstream
-# ~11-container stack + overlays config. We orchestrate:
-#   1. derive PANEL_DOMAIN; write the Dify .env.overlay (DOMAIN, generated SECRET_KEY,
-#      nginx on host :8080 / SSL port moved OFF 8443, https off, optional avots).
-#   2. run provision.sh -> brings up the Dify stack (nginx on 127.0.0.1:8080).
-#   3. bring up panel-compose.yml -> our panel (127.0.0.1:8081) + host-network Caddy
-#      (:443 -> Dify, :8443 -> panel, :80 ACME).
-#   4. disable this oneshot.
-# Dify login + model provider are configured inside Dify's console (it's a builder;
-# the avots provider wiring is best-effort/manual — see provision.sh).
+# Vanilla product: Dify runs its OWN upstream stack on its OWN standard port, with
+# NO CloudHosting panel/Caddy layer. provision.sh clones Dify's upstream ~11-container
+# stack + overlays our per-VM config. Steps:
+#   1. derive DOMAIN; write the Dify .env.overlay (generated SECRET_KEY, http base URL,
+#      nginx on the standard :80, https off, optional avots for the manual wiring hint).
+#   2. run provision.sh -> brings up the Dify stack (nginx on host :80).
+#   3. disable this oneshot.
+# Dify login + model provider are configured inside Dify's console at /install
+# (avots = OpenAI-API-compatible provider; see provision.sh for the wiring hint).
+#
+# NOTE: served over plain HTTP on :80 (no TLS here, by design). Put a TLS terminator
+# in front if you want HTTPS (and flip APP_BASE_URL/NGINX_HTTPS_ENABLED).
 
 set -euo pipefail
 
 APP_DIR="/opt/dify-vm"
-ENV_FILE="${APP_DIR}/.env"                 # compose-level: PANEL_PASSWORD/DOMAIN
+ENV_FILE="${APP_DIR}/.env"                 # holds PANEL_DOMAIN (+ optional AVOTS_API_KEY)
 DIFY_DIR="${APP_DIR}/state"                # provision.sh clones upstream under here
 OVERLAY_FILE="${DIFY_DIR}/.env.overlay"
-PANEL_COMPOSE="${APP_DIR}/panel-compose.yml"
-PANEL_UID="${PANEL_UID:-1000}"; PANEL_GID="${PANEL_GID:-1000}"
 
 log() { printf '[firstboot %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 die() { printf '[firstboot ERROR] %s\n' "$*" >&2; exit 1; }
@@ -32,7 +32,7 @@ mkdir -p "${DIFY_DIR}"
 # shellcheck disable=SC1090
 set -a && . "${ENV_FILE}" && set +a || true
 
-# --- 1. Derive PANEL_DOMAIN if blank ------------------------------------------------
+# --- 1. Derive PANEL_DOMAIN if blank (used for Dify's public URLs) ------------------
 if [ -z "${PANEL_DOMAIN:-}" ]; then
   IP="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}' | head -n1)"
   [ -n "${IP}" ] || IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -58,59 +58,27 @@ umask 077
 cat > "${OVERLAY_FILE}" <<EOF
 SECRET_KEY=${SECRET_KEY}
 DOMAIN=${PANEL_DOMAIN}
+APP_BASE_URL=http://${PANEL_DOMAIN}
 AVOTS_API_KEY=${AVOTS_API_KEY:-}
 AVOTS_BASE_URL=https://api.avots.ai/openai/v1
 AVOTS_MODEL=anthropic/claude-opus-4.8
 AVOTS_MODEL_CONTEXT=200000
 NGINX_HTTPS_ENABLED=false
-EXPOSE_NGINX_PORT=8080
-EXPOSE_NGINX_SSL_PORT=8444
+EXPOSE_NGINX_PORT=80
+EXPOSE_NGINX_SSL_PORT=443
 FORCE_VERIFYING_SIGNATURE=false
 PLUGIN_MAX_PACKAGE_SIZE=524288000
 NGINX_CLIENT_MAX_BODY_SIZE=100M
 EOF
-log "Wrote ${OVERLAY_FILE} (Dify nginx on :8080; SSL port 8444 so it won't touch panel :8443)"
+log "Wrote ${OVERLAY_FILE} (Dify nginx on the standard :80, http base ${PANEL_DOMAIN})"
 
 # --- 3. Bring up the Dify upstream stack --------------------------------------------
 log "Running provision.sh (clone + start Dify upstream stack)…"
 chmod +x "${APP_DIR}/provision.sh"
 DIFY_DIR="${DIFY_DIR}" bash "${APP_DIR}/provision.sh"
 
-# --- 4. Panel side-stack (panel + host-network Caddy) -------------------------------
-mkdir -p "${APP_DIR}/paneldata"
-chown -R "${PANEL_UID}:${PANEL_GID}" "${APP_DIR}/paneldata"
-chmod 0700 "${APP_DIR}/paneldata"
-log "Bringing up the panel + Caddy side-stack…"
-docker compose -f "${PANEL_COMPOSE}" pull
-docker compose -f "${PANEL_COMPOSE}" up -d
-
-# --- 4b. Install the host-side software updater (panel "Update software" button) -----
-# The panel (unprivileged) writes ./paneldata/.update-request; this host updater
-# git-pulls dify-vm + docker compose -f panel-compose.yml pull/up. NOTE: this updates
-# OUR panel side-stack + config; Dify's own upstream stack (under state/) updates via
-# Dify's own channel, not here.
-log "Installing updater units"
-APPLIER_LIB="/usr/local/lib/cloudhosting"
-install -d -m 0755 "${APPLIER_LIB}"
-install -m 0755 "${APP_DIR}/applier/update.sh" "${APPLIER_LIB}/update.sh"
-cp "${APP_DIR}/applier/cloudhosting-updater.path"    /etc/systemd/system/
-cp "${APP_DIR}/applier/cloudhosting-updater.service" /etc/systemd/system/
-cat > /etc/cloudhosting-panel.env <<EOF
-PRODUCT=dify
-COMPOSE_FILE=${PANEL_COMPOSE}
-COMPOSE_PROJECT_DIR=${APP_DIR}
-REPO_DIR=${APP_DIR}
-DATA_DIR=${APP_DIR}/paneldata
-UPDATE_BRANCH=main
-EOF
-chmod 0644 /etc/cloudhosting-panel.env
-systemctl daemon-reload
-systemctl enable --now cloudhosting-updater.path
-log "Updater enabled (watching ${APP_DIR}/paneldata/.update-request)"
-"${APPLIER_LIB}/update.sh" --stamp-only || log "WARN: initial version stamp failed"
-
-# --- 5. Disable this oneshot --------------------------------------------------------
+# --- 4. Disable this oneshot --------------------------------------------------------
 log "Disabling dify-firstboot.service (provisioning complete)"
 systemctl disable dify-firstboot.service 2>/dev/null || true
 
-log "First boot complete. Panel: https://${PANEL_DOMAIN}:8443  ·  Dify: https://${PANEL_DOMAIN}/install (first run: create admin)"
+log "First boot complete. Dify: http://${PANEL_DOMAIN}/install (first run: create admin)"

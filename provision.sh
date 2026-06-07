@@ -57,8 +57,8 @@ AVOTS_API_KEY="${AVOTS_API_KEY:-}"
 AVOTS_BASE_URL="${AVOTS_BASE_URL:-https://api.avots.ai/openai/v1}"
 AVOTS_MODEL="${AVOTS_MODEL:-anthropic/claude-opus-4.8}"
 AVOTS_MODEL_CONTEXT="${AVOTS_MODEL_CONTEXT:-200000}"
-EXPOSE_NGINX_PORT="${EXPOSE_NGINX_PORT:-8080}"
-EXPOSE_NGINX_SSL_PORT="${EXPOSE_NGINX_SSL_PORT:-8443}"
+EXPOSE_NGINX_PORT="${EXPOSE_NGINX_PORT:-80}"
+EXPOSE_NGINX_SSL_PORT="${EXPOSE_NGINX_SSL_PORT:-443}"
 
 # ---- 1. Clone Dify at the pinned tag (idempotent) ----------------------------
 # Alternative for golden images: bake the checkout at ${UPSTREAM_DIR} during
@@ -111,8 +111,10 @@ PY
   fi
 }
 
-BASE="https://${DOMAIN}"
-log "Writing per-VM values into ${ENV_FILE}"
+# Public base URL. Vanilla install serves plain HTTP on :80, so the overlay sets
+# APP_BASE_URL=http://${DOMAIN}; fall back to https for a TLS-fronted deployment.
+BASE="${APP_BASE_URL:-https://${DOMAIN}}"
+log "Writing per-VM values into ${ENV_FILE} (base ${BASE})"
 set_env SECRET_KEY                "${SECRET_KEY}"
 
 # Public URLs — all behind Caddy's TLS on ${DOMAIN}.
@@ -123,8 +125,7 @@ set_env APP_API_URL               "${BASE}"
 set_env APP_WEB_URL               "${BASE}"
 set_env FILES_URL                 "${BASE}"
 
-# nginx: plain HTTP, Caddy terminates TLS. Publish container:80 on host:8080,
-# do NOT publish 443 (Caddy owns it).
+# nginx: plain HTTP on the standard host port (no external TLS terminator here).
 set_env NGINX_HTTPS_ENABLED       "false"
 set_env EXPOSE_NGINX_PORT         "${EXPOSE_NGINX_PORT}"
 set_env EXPOSE_NGINX_SSL_PORT     "${EXPOSE_NGINX_SSL_PORT}"
